@@ -56,6 +56,7 @@ public abstract class AbstractMailActivity extends ActionBarActivity implements 
             StrictMode.setVmPolicy(new StrictMode.VmPolicy.Builder()
                     .detectLeakedSqlLiteObjects()
                     .detectLeakedClosableObjects()
+                    .detectActivityLeaks()
                     .penaltyLog()
                     .build());
         }
