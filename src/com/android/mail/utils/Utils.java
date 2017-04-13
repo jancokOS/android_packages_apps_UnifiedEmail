@@ -96,6 +96,7 @@ public class Utils {
     public static final String EXTRA_FROM_NOTIFICATION = "notification";
     public static final String EXTRA_IGNORE_INITIAL_CONVERSATION_LIMIT =
             "ignore-initial-conversation-limit";
+    public static final String EXTRA_CONVERSATIONLIST_URI = "uimessages";
 
     public static final String MAILTO_SCHEME = "mailto";
 
@@ -110,6 +111,8 @@ public class Utils {
     // TODO: UI Provider has this notification URI?
     public static final String ACTION_NOTIFY_DATASET_CHANGED =
             "com.android.mail.ACTION_NOTIFY_DATASET_CHANGED";
+    public static final String ACTION_WIDGET_FOLDER_UPDATE =
+            "com.android.email.ACTION_WIDGET_FOLDER_UPDATE";
 
     /** Parameter keys for context-aware help. */
     private static final String SMART_HELP_LINK_PARAMETER_NAME = "p";
