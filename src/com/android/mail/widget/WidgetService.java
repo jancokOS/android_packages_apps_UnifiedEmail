@@ -17,14 +17,19 @@ package com.android.mail.widget;
 
 import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.CursorLoader;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.Loader;
+
 import android.content.Loader.OnLoadCompleteListener;
 import android.content.res.Resources;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.Looper;
 import android.support.v4.app.TaskStackBuilder;
 import android.text.SpannableString;
@@ -54,8 +59,11 @@ import com.android.mail.utils.LogTag;
 import com.android.mail.utils.LogUtils;
 import com.android.mail.utils.Utils;
 
+import com.google.common.collect.Sets;
+import com.google.common.primitives.Ints;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public class WidgetService extends RemoteViewsService {
     /**
@@ -205,6 +213,7 @@ public class WidgetService extends RemoteViewsService {
         private static final int FOLDER_LOADER_ID = 0;
         private static final int CONVERSATION_CURSOR_LOADER_ID = 1;
         private static final int ACCOUNT_LOADER_ID = 2;
+        private static final int VIRTUALMAILBOX_LOADER_ID = 3;
 
         private final Context mContext;
         private final int mAppWidgetId;
@@ -226,6 +235,10 @@ public class WidgetService extends RemoteViewsService {
         private final WidgetService mService;
         private String mSendersSplitToken;
         private String mElidedPaddingToken;
+        private UpdateFolderWidgetReceiver mUpdateFolderWidgetReceiver;
+        private CursorLoader mVirtualMailBoxLoader;
+        private int[] mWidgetIds;
+        private VirtualMailBoxLoaderCompleterListener mMailBoxLoaderCompleterListener;
 
         public MailFactory(Context context, Intent intent, WidgetService service) {
             mContext = context;
@@ -315,6 +328,11 @@ public class WidgetService extends RemoteViewsService {
                     UIProvider.ACCOUNTS_PROJECTION_NO_CAPABILITIES, null, null, null);
             mAccountLoader.registerListener(ACCOUNT_LOADER_ID, this);
             mAccountLoader.startLoading();
+
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(Utils.ACTION_WIDGET_FOLDER_UPDATE);
+            mUpdateFolderWidgetReceiver = new UpdateFolderWidgetReceiver();
+            mContext.registerReceiver(mUpdateFolderWidgetReceiver, filter);
         }
 
         @Override
@@ -341,6 +359,21 @@ public class WidgetService extends RemoteViewsService {
                 mAccountLoader.reset();
                 mAccountLoader.unregisterListener(this);
                 mAccountLoader = null;
+            }
+
+
+            if (mVirtualMailBoxLoader != null) {
+                mVirtualMailBoxLoader.reset();
+                if (mMailBoxLoaderCompleterListener != null) {
+                    mVirtualMailBoxLoader.unregisterListener(mMailBoxLoaderCompleterListener);
+                }
+                mVirtualMailBoxLoader = null;
+                mMailBoxLoaderCompleterListener = null;
+                mWidgetIds = null;
+            }
+
+            if (mUpdateFolderWidgetReceiver != null) {
+                mContext.unregisterReceiver(mUpdateFolderWidgetReceiver);
             }
         }
 
@@ -615,6 +648,130 @@ public class WidgetService extends RemoteViewsService {
                 // Start the loader. The cached data will be returned if present.
                 if (mFolderLoader != null) {
                     mFolderLoader.startLoading();
+                }
+            }
+        }
+
+        public class UpdateFolderWidgetReceiver extends BroadcastReceiver {
+            @Override
+            public void onReceive(final Context context, Intent intent) {
+                if (intent.getAction() == Utils.ACTION_WIDGET_FOLDER_UPDATE) {
+                    final Bundle extras = intent.getExtras();
+                    if (extras == null) {
+                        return;
+                    }
+
+                    final Uri accountUri = extras.getParcelable(Utils.EXTRA_ACCOUNT_URI);
+                    final Uri folderUri = extras.getParcelable(Utils.EXTRA_FOLDER_URI);
+                    final Uri conversationListUri =
+                            extras.getParcelable(Utils.EXTRA_CONVERSATIONLIST_URI);
+                    final boolean updateAllWidgets =
+                            extras.getBoolean(BaseWidgetProvider.EXTRA_UPDATE_ALL_WIDGETS, false);
+
+                    if (mVirtualMailBoxLoader != null && !mVirtualMailBoxLoader.isReset()) {
+                        mVirtualMailBoxLoader.reset();
+                    }
+
+                    if (mVirtualMailBoxLoader == null) {
+                        mVirtualMailBoxLoader = new CursorLoader(mContext,
+                                builderConversationQueryUri(conversationListUri),
+                                UIProvider.CONVERSATION_PROJECTION, null, null, null);
+                        mMailBoxLoaderCompleterListener =
+                                new VirtualMailBoxLoaderCompleterListener();
+                        mVirtualMailBoxLoader.registerListener(VIRTUALMAILBOX_LOADER_ID,
+                                mMailBoxLoaderCompleterListener);
+                    } else {
+                        mVirtualMailBoxLoader
+                                .setUri(builderConversationQueryUri(conversationListUri));
+                    }
+
+                    mWidgetIds = getWidgetIds(accountUri, folderUri, updateAllWidgets);
+                    mVirtualMailBoxLoader.setUpdateThrottle(
+                            context.getResources().getInteger(R.integer.widget_refresh_delay_ms));
+                    mVirtualMailBoxLoader.startLoading();
+                }
+
+            }
+
+            private int[] getWidgetIds(Uri accountUri, Uri folderUri, boolean updateAllWidgets) {
+                if (accountUri == null && Utils.isEmpty(folderUri) && !updateAllWidgets) {
+                    return new int[0];
+                }
+                final Set<Integer> widgetsToUpdate = Sets.newHashSet();
+                for (int id : getCurrentWidgetIds(mContext)) {
+                    // Retrieve the persisted information for this widget from
+                    // preferences.
+                    final String accountFolder = MailPrefs.get(mContext).getWidgetConfiguration(id);
+                    // If the account matched, update the widget.
+                    if (accountFolder != null) {
+                        final String[] parsedInfo = TextUtils.split(accountFolder,
+                                BaseWidgetProvider.ACCOUNT_FOLDER_PREFERENCE_SEPARATOR);
+                        boolean updateThis = updateAllWidgets;
+                        if (!updateThis) {
+                            if (accountUri != null &&
+                                    TextUtils.equals(accountUri.toString(), parsedInfo[0])) {
+                                updateThis = true;
+                            } else if (folderUri != null &&
+                                    TextUtils.equals(folderUri.toString(), parsedInfo[1])) {
+                                updateThis = true;
+                            }
+                        }
+                        if (updateThis) {
+                            widgetsToUpdate.add(id);
+                        }
+                    }
+                }
+                if (widgetsToUpdate.size() == 0) {
+                    return new int[0];
+                }
+                return Ints.toArray(widgetsToUpdate);
+            }
+
+            private int[] getCurrentWidgetIds(Context context) {
+                final AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+                final ComponentName mailComponent = new ComponentName(context,
+                        BaseWidgetProvider.getProviderName(context));
+                return appWidgetManager.getAppWidgetIds(mailComponent);
+            }
+
+            private Uri builderConversationQueryUri(Uri conversationListUri) {
+                final Uri.Builder builder = conversationListUri.buildUpon();
+                final String maxConversations = Integer.toString(MAX_CONVERSATIONS_COUNT);
+                final Uri widgetConversationQueryUri = builder
+                        .appendQueryParameter(ConversationListQueryParameters.LIMIT,
+                                maxConversations)
+                        .appendQueryParameter(ConversationListQueryParameters.USE_NETWORK,
+                                Boolean.FALSE.toString())
+                        .appendQueryParameter(ConversationListQueryParameters.ALL_NOTIFICATIONS,
+                                Boolean.TRUE.toString()).build();
+                return widgetConversationQueryUri;
+            }
+
+        }
+
+        private class VirtualMailBoxLoaderCompleterListener implements
+                OnLoadCompleteListener<Cursor> {
+
+            @Override
+            public void onLoadComplete(Loader<Cursor> loader, Cursor data) {
+                final AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(mContext);
+                final RemoteViews remoteViews =
+                        new RemoteViews(mContext.getPackageName(), R.layout.widget);
+                if (data != null) {
+                    synchronized (sWidgetLock) {
+                        if (!isDataValid(data)) {
+                            mConversationCursor = null;
+                        } else {
+                            mConversationCursor = data;
+                        }
+                    }
+                    appWidgetManager.notifyAppWidgetViewDataChanged(mWidgetIds,
+                            R.id.conversation_list);
+                    if (mConversationCursor == null || mConversationCursor.getCount() == 0) {
+                        remoteViews.setTextViewText(R.id.empty_conversation_list,
+                                mContext.getString(R.string.empty_folder));
+                        appWidgetManager.partiallyUpdateAppWidget(mAppWidgetId, remoteViews);
+                    }
                 }
             }
         }
